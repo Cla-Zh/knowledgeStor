@@ -70,6 +70,6 @@ graph:
   # 当数据集缺少结构化关系（如 MilitaryData 纯文本）时自动启用
   triple_extraction:
     enabled: true                # 是否启用 LLM 三元组抽取
-    max_workers: 3               # 并发调用 LLM 的线程数
+    max_workers: 10              # 并发调用 LLM 的线程数（建议 5~20，受 API 限速约束）
     max_chunk_chars: 2000        # 每个文本块的最大字符数
     chunk_overlap: 200           # 文本块之间的重叠字符数

@@ -345,7 +345,10 @@ class TripleExtractor:
         show_progress: bool = True,
     ) -> Tuple[List[Entity], List[Relation]]:
         """
-        从多篇文本中批量抽取实体和关系，使用多线程并发调用 LLM。
+        从多篇文本中批量抽取实体和关系。
+
+        全部文本块使用 ThreadPoolExecutor 并发调用 LLM，
+        并发数由 config.yaml 的 graph.triple_extraction.max_workers 控制。
         """
         if not texts:
             return [], []
@@ -359,59 +362,47 @@ class TripleExtractor:
         if not all_chunks:
             return [], []
 
+        total = len(all_chunks)
         logger.info(
-            f"三元组抽取: {len(texts)} 篇文本 → {len(all_chunks)} 个文本块, "
-            f"使用 {self.max_workers} 个并发线程, model={self.model}"
+            f"三元组抽取: {len(texts)} 篇文本 → {total} 个文本块, "
+            f"并发线程={self.max_workers}, model={self.model}"
         )
-
-        # 先测试一个调用，确认 LLM 连接正常 & 能产出三元组
-        logger.info("  测试 LLM 连接...")
-        test_triples = self._call_llm(all_chunks[0])
-        logger.info(f"  测试调用完成: 返回 {len(test_triples)} 个三元组")
-        if test_triples:
-            logger.info(f"  示例三元组: {test_triples[0]}")
-        else:
-            logger.warning(
-                "  测试调用未返回任何三元组！请检查 LLM 配置和文本内容。"
-                f"  文本前200字: {all_chunks[0][:200]}"
-            )
-
-        # 并发调用 LLM（第一个已经处理过，跳过）
-        all_triples = list(test_triples)
-        remaining_chunks = all_chunks[1:]
-
-        if not remaining_chunks:
-            logger.info(f"三元组抽取完成: 共提取 {len(all_triples)} 个三元组")
-            return self._triples_to_entities_and_relations(all_triples)
 
         # 设置进度条
         pbar = None
         if show_progress:
             try:
                 from tqdm import tqdm
-                pbar = tqdm(total=len(remaining_chunks), desc="LLM 三元组抽取")
+                pbar = tqdm(total=total, desc="LLM 三元组抽取")
             except ImportError:
                 pass
 
+        all_triples: List[Dict[str, str]] = []
         success_count = 0
         fail_count = 0
+        first_example_logged = False
 
         with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-            future_to_idx = {}
-            for idx, chunk in enumerate(remaining_chunks):
-                future = executor.submit(self._call_llm, chunk)
-                future_to_idx[future] = idx
+            # 一次性提交全部文本块
+            future_to_idx = {
+                executor.submit(self._call_llm, chunk): idx
+                for idx, chunk in enumerate(all_chunks)
+            }
 
             for future in as_completed(future_to_idx):
+                idx = future_to_idx[future]
                 try:
                     triples = future.result(timeout=self.timeout + 30)
                     all_triples.extend(triples)
                     if triples:
                         success_count += 1
+                        # 打印第一个成功的示例三元组
+                        if not first_example_logged:
+                            logger.info(f"  示例三元组: {triples[0]}")
+                            first_example_logged = True
                     else:
                         fail_count += 1
                 except Exception as e:
-                    idx = future_to_idx[future]
                     logger.warning(f"文本块 {idx} 三元组抽取异常: {e}")
                     fail_count += 1
 
@@ -421,11 +412,9 @@ class TripleExtractor:
         if pbar:
             pbar.close()
 
-        total_success = success_count + (1 if test_triples else 0)
-        total_fail = fail_count + (0 if test_triples else 1)
         logger.info(
             f"三元组抽取完成: 共提取 {len(all_triples)} 个三元组, "
-            f"成功={total_success}, 空结果={total_fail}"
+            f"成功={success_count}, 空结果={fail_count}"
         )
 
         return self._triples_to_entities_and_relations(all_triples)
