@@ -1,0 +1,64 @@
+# ============================================================
+# NSEQA - 神经-符号混合分布式知识专家问答系统 配置文件
+# ============================================================
+
+system:
+  n_experts: null          # null 表示自动识别专家数量
+  expert_identification_method: 'clustering'  # 'clustering', 'lda', 'entity_based'
+  random_seed: 42
+  log_level: 'INFO'
+
+# ----------------------------------------------------------
+# OpenAI 兼容 API 配置
+# 所有外部模型调用均通过 OpenAI API 格式访问
+# 支持 OpenAI 官方、Azure OpenAI、以及任何兼容接口
+#   （如 vLLM、Ollama、LiteLLM、DeepSeek 等）
+# ----------------------------------------------------------
+api:
+  # Embedding 模型 API
+  embedding:
+    api_key: 'sk-xxx'                              # 替换为你的 API Key
+    base_url: 'https://api.openai.com/v1'          # API 基础 URL
+    model: 'text-embedding-3-small'                # Embedding 模型名称
+    dimension: 1536                                # 向量维度（需与模型匹配）
+    batch_size: 64                                 # 每次 API 调用的最大文本数
+    max_retries: 3                                 # API 调用失败重试次数
+    timeout: 60                                    # 请求超时时间（秒）
+
+  # 生成/推理模型 API（用于答案生成、语义解析增强等）
+  chat:
+    api_key: 'sk-xxx'                              # 替换为你的 API Key
+    base_url: 'https://api.openai.com/v1'          # API 基础 URL
+    model: 'gpt-4o-mini'                           # Chat 模型名称
+    temperature: 0.0                               # 生成温度（0 = 确定性）
+    max_tokens: 512                                # 最大生成 token 数
+    max_retries: 3
+    timeout: 60
+
+retrieval:
+  vector_top_k: 5
+  rerank: true
+  hybrid_alpha: 0.7        # 向量检索权重 (1 - alpha 为图谱检索权重)
+  similarity_threshold: 0.3
+
+reasoning:
+  max_hops: 5
+  max_iterations: 3
+  reasoning_mode: 'chain'  # 'chain', 'graph', 'iterative'
+  confidence_threshold: 0.5
+
+storage:
+  kb_base_path: './data/knowledge_bases'
+  raw_data_path: './data/raw'
+  processed_data_path: './data/processed'
+  cache_enabled: true
+  cache_path: './data/cache'
+
+vector_index:
+  index_type: 'faiss'      # 'faiss', 'annoy', 'simple'
+  normalize_embeddings: true
+  nprobe: 10               # FAISS IVF 参数
+
+graph:
+  max_path_length: 3
+  min_confidence: 0.5
