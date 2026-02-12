@@ -37,6 +37,7 @@ from data.models import Document, Entity, Question, Relation
 from kb_builder.expert_identifier import ExpertIdentifier
 from kb_builder.graph_builder import KnowledgeGraphBuilder
 from kb_builder.models import ExpertDomain, KnowledgeGraph, VectorIndex
+from kb_builder.triple_extractor import TripleExtractor
 from kb_builder.vector_builder import VectorIndexBuilder
 from experts.base_expert import DomainExpert
 from utils.config import Config
@@ -84,6 +85,7 @@ class KBBuildPipeline:
         self._identifier: Optional[ExpertIdentifier] = None
         self._vector_builder: Optional[VectorIndexBuilder] = None
         self._graph_builder: Optional[KnowledgeGraphBuilder] = None
+        self._triple_extractor: Optional[TripleExtractor] = None
 
         # 构建过程中的中间数据
         self._questions: List[Question] = []
@@ -123,6 +125,12 @@ class KBBuildPipeline:
         if self._graph_builder is None:
             self._graph_builder = KnowledgeGraphBuilder(config=self._config)
         return self._graph_builder
+
+    @property
+    def triple_extractor(self) -> TripleExtractor:
+        if self._triple_extractor is None:
+            self._triple_extractor = TripleExtractor(config=self._config)
+        return self._triple_extractor
 
     # ==========================================
     # 主流程
@@ -372,23 +380,61 @@ class KBBuildPipeline:
         """
         为单个专家构建知识图谱
 
+        流程：
+        1. 先从结构化数据（evidences / supporting_facts）中提取实体和关系
+        2. 如果结构化关系为空（如 MilitaryData），使用 LLM 自动从文本中抽取三元组
+        3. 合并所有实体和关系，构建图谱
+
         Args:
             questions: 分配给该专家的问题列表
 
         Returns:
             KnowledgeGraph 实例
         """
-        # 提取实体
-        entities = self.loader.extract_entities_from_questions(questions)
+        # Step 1: 尝试从结构化数据中提取实体和关系
+        structured_entities = self.loader.extract_entities_from_questions(questions)
+        structured_relations = self.loader.extract_relations_from_questions(questions)
+        logger.info(
+            f"    结构化数据提取: {len(structured_entities)} 个实体, "
+            f"{len(structured_relations)} 条关系"
+        )
 
-        # 提取关系
-        relations = self.loader.extract_relations_from_questions(questions)
+        # Step 2: 决定实体/关系来源
+        if structured_relations:
+            # 有结构化关系（2Wiki/MuSiQue），直接使用
+            entities = structured_entities
+            relations = structured_relations
+        elif self.triple_extractor.enabled:
+            # 无结构化关系（MilitaryData 等纯文本），完全由 LLM 抽取
+            # 不使用标题实体，因为文章标题是整句话，不是有效的图谱节点
+            logger.info(
+                f"    结构化关系为空，丢弃标题实体，"
+                f"启用 LLM 三元组抽取 (model={self.triple_extractor.model})..."
+            )
+            entities = []
+            relations = []
+            try:
+                llm_entities, llm_relations = self.triple_extractor.extract_from_questions(
+                    questions, show_progress=True
+                )
+                entities = llm_entities
+                relations = llm_relations
+                logger.info(
+                    f"    LLM 抽取完成: {len(llm_entities)} 实体, "
+                    f"{len(llm_relations)} 关系"
+                )
+            except Exception as e:
+                logger.error(f"    LLM 三元组抽取失败: {e}", exc_info=True)
+        else:
+            logger.info("    LLM 三元组抽取已禁用，使用标题实体（无关系）")
+            entities = structured_entities
+            relations = []
 
         if not entities and not relations:
             logger.warning("没有实体和关系可用于构建知识图谱")
             return KnowledgeGraph()
 
-        # 构建图谱
+        # Step 3: 构建图谱
         graph = self.graph_builder.build_graph(entities, relations)
 
         return graph

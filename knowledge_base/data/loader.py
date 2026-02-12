@@ -249,6 +249,201 @@ class DatasetLoader:
         return max(len(unique_titles), 1)
 
     # ==========================================
+    # MilitaryData 数据集加载
+    # ==========================================
+
+    def load_military(self, path: str, max_samples: Optional[int] = None) -> List[Question]:
+        """
+        加载 MilitaryData 数据集
+
+        支持两种格式：
+        1. 知识库文章（构建用）: [{"id": ..., "text": "...", "metadata": {...}}, ...]
+        2. 测试问题（评估用）: [{"question": "...", "answer": "..."/"[...]"}, ...]
+
+        自动根据数据内容判断格式。当 path 为目录时，加载目录下所有 JSON 文件。
+
+        Args:
+            path: 数据文件或目录路径
+            max_samples: 最大加载样本数
+
+        Returns:
+            Question 对象列表
+        """
+        logger.info(f"开始加载 MilitaryData 数据集: {path}")
+
+        # 如果是目录，加载目录下所有 JSON 文件
+        if os.path.isdir(path):
+            all_data = []
+            for json_file in sorted(Path(path).glob("*.json")):
+                all_data.extend(self._load_json(str(json_file)))
+        else:
+            all_data = self._load_json(path)
+
+        if not all_data:
+            logger.warning(f"未加载到任何数据: {path}")
+            return []
+
+        # 自动判断数据格式：文章 vs 测试题
+        sample = all_data[0]
+        if "question" in sample and "answer" in sample:
+            questions = self._parse_military_test_data(all_data, max_samples)
+        else:
+            questions = self._parse_military_articles(all_data, max_samples)
+
+        self._loaded_questions.extend(questions)
+        logger.info(f"MilitaryData 加载完成: {len(questions)} 条数据")
+        return questions
+
+    def _parse_military_articles(self, articles: List[Dict[str, Any]],
+                                  max_samples: Optional[int] = None) -> List[Question]:
+        """
+        解析 MilitaryData 知识库文章
+
+        将每篇文章转换为 Question 对象，文章文本作为上下文，
+        同时将全文写入 text 字段用于后续领域聚类。
+
+        Args:
+            articles: 文章数据列表
+            max_samples: 最大样本数
+
+        Returns:
+            Question 对象列表
+        """
+        if max_samples is not None:
+            articles = articles[:max_samples]
+
+        questions = []
+        for i, article in enumerate(articles):
+            try:
+                text = article.get("text", "")
+                if not text.strip():
+                    continue
+
+                # 提取标题
+                title = self._extract_title_from_text(text)
+                if not title:
+                    title = f"military_article_{i}"
+
+                # 将文章按段落切分（用于上下文）
+                paragraphs = [p.strip() for p in text.split("\n") if p.strip()]
+
+                question = Question(
+                    id=f"military_art_{i}",
+                    text=text,  # 全文用于 TF-IDF 聚类
+                    question_type=QuestionType.UNKNOWN.value,
+                    answer="",
+                    context=[(title, paragraphs)],
+                    metadata={
+                        "dataset": "MilitaryData",
+                        "data_type": "article",
+                        "original_id": article.get("id", ""),
+                        "lang": article.get("metadata", {}).get("lang", "zh-CN"),
+                    },
+                )
+                questions.append(question)
+            except Exception as e:
+                logger.warning(f"解析 MilitaryData 文章 {i} 失败: {e}")
+
+        logger.info(f"MilitaryData 文章加载完成: {len(questions)} 篇文章")
+        return questions
+
+    def _parse_military_test_data(self, test_data: List[Dict[str, Any]],
+                                   max_samples: Optional[int] = None) -> List[Question]:
+        """
+        解析 MilitaryData 测试数据
+
+        将测试题转换为 Question 对象，支持 answer 为字符串或列表。
+
+        Args:
+            test_data: 测试数据列表
+            max_samples: 最大样本数
+
+        Returns:
+            Question 对象列表
+        """
+        if max_samples is not None:
+            test_data = test_data[:max_samples]
+
+        questions = []
+        for i, item in enumerate(test_data):
+            try:
+                question_text = item.get("question", "")
+                if not question_text.strip():
+                    continue
+
+                raw_answer = item.get("answer", "")
+
+                # 处理答案格式：可能是字符串或列表
+                if isinstance(raw_answer, list):
+                    answer = raw_answer[0] if raw_answer else ""
+                    answer_aliases = raw_answer[1:] if len(raw_answer) > 1 else []
+                else:
+                    answer = str(raw_answer)
+                    answer_aliases = []
+
+                # 提取 chunk_titles（用于文档召回评估）
+                chunk_titles = item.get("chunk_titles", [])
+                cleaned_chunk_titles = []
+                for ct in chunk_titles:
+                    if ct.startswith("标题: "):
+                        cleaned_chunk_titles.append(ct[len("标题: "):])
+                    elif ct.startswith("标题:"):
+                        cleaned_chunk_titles.append(ct[len("标题:"):])
+                    else:
+                        cleaned_chunk_titles.append(ct)
+
+                question = Question(
+                    id=f"military_test_{i}",
+                    text=question_text,
+                    question_type=QuestionType.MULTI_HOP.value,
+                    answer=answer,
+                    reasoning_hops=3,  # 军事领域多跳问题估计
+                    metadata={
+                        "dataset": "MilitaryData",
+                        "data_type": "test",
+                        "answer_aliases": answer_aliases,
+                        "chunk_titles": cleaned_chunk_titles,
+                        "description": item.get("description", ""),
+                    },
+                )
+                questions.append(question)
+            except Exception as e:
+                logger.warning(f"解析 MilitaryData 测试题 {i} 失败: {e}")
+
+        logger.info(f"MilitaryData 测试集加载完成: {len(questions)} 个问题")
+        return questions
+
+    @staticmethod
+    def _extract_title_from_text(text: str) -> str:
+        """
+        从文章文本中提取标题
+
+        支持 "标题: XXX" 和 "标题:XXX" 格式。
+
+        Args:
+            text: 文章全文
+
+        Returns:
+            提取到的标题，如果未找到返回空字符串
+        """
+        if not text:
+            return ""
+
+        first_line = text.split("\n")[0].strip()
+
+        # 匹配 "标题:" 或 "标题: " 前缀
+        if first_line.startswith("标题:"):
+            title = first_line[len("标题:"):].strip()
+            if title:
+                return title
+
+        # 如果第一行较短（可能本身就是标题）
+        if 0 < len(first_line) <= 60:
+            return first_line
+
+        return ""
+
+    # ==========================================
     # MuSiQue 数据集加载
     # ==========================================
 
@@ -386,6 +581,8 @@ class DatasetLoader:
             return self.load_2wiki(path, max_samples)
         elif dataset_type == "musique":
             return self.load_musique(path, max_samples)
+        elif dataset_type == "military":
+            return self.load_military(path, max_samples)
         else:
             raise ValueError(f"不支持的数据集类型: {dataset_type}")
 
@@ -445,6 +642,14 @@ class DatasetLoader:
                         return "2wiki"
                     if "question_decomposition" in sample:
                         return "musique"
+                    # MilitaryData 文章格式: {"id": ..., "text": "...", "metadata": {...}}
+                    if "text" in sample and "metadata" in sample and "question" not in sample:
+                        return "military"
+                    # MilitaryData 测试格式: {"question": "...", "answer": "..."}
+                    if ("question" in sample and "answer" in sample
+                            and "supporting_facts" not in sample
+                            and "question_decomposition" not in sample):
+                        return "military"
         except (json.JSONDecodeError, UnicodeDecodeError):
             pass
 

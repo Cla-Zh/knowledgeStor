@@ -155,7 +155,10 @@ class Evaluator:
         self.qa_pipeline = qa_pipeline
         self._loader = DatasetLoader()
 
-        logger.info("Evaluator 初始化完成")
+        # 评估时召回文档数量（默认 5）
+        self.eval_top_k = config.get("evaluation.top_k", 5)
+
+        logger.info(f"Evaluator 初始化完成: eval_top_k={self.eval_top_k}")
 
     def set_pipeline(self, qa_pipeline: Any):
         """设置问答流程"""
@@ -213,32 +216,48 @@ class Evaluator:
 
             try:
                 # 调用问答系统
-                answer = self.qa_pipeline.answer(question.text)
-                prediction = answer.text if hasattr(answer, 'text') else str(answer)
-                confidence = answer.confidence if hasattr(answer, 'confidence') else 0.0
+                answer_obj = self.qa_pipeline.answer(question.text)
+                answer_text = answer_obj.text if hasattr(answer_obj, 'text') else str(answer_obj)
+                confidence = answer_obj.confidence if hasattr(answer_obj, 'confidence') else 0.0
+
+                # 提取召回文档（按相关度排序，取 top_k 条）
+                raw_docs = []
+                if hasattr(answer_obj, 'metadata') and isinstance(answer_obj.metadata, dict):
+                    raw_docs = answer_obj.metadata.get("retrieved_documents", [])
+                retrieved_documents = raw_docs[:self.eval_top_k]
+
             except Exception as e:
                 logger.warning(f"问题 {i+1} 回答失败: {e}")
-                prediction = ""
+                answer_text = ""
                 confidence = 0.0
+                retrieved_documents = []
 
             q_time = time.time() - q_start
             question_times.append(q_time)
 
             ground_truth = question.answer
-            all_predictions.append(prediction)
+            all_predictions.append(answer_text)
             all_ground_truths.append(ground_truth)
 
-            # 计算单题指标
-            em = exact_match(prediction, ground_truth)
-            f1 = f1_score(prediction, ground_truth)
+            # 计算单题指标（基于 answer 而非原始文档）
+            em = exact_match(answer_text, ground_truth)
+            f1 = f1_score(answer_text, ground_truth)
             aliases = question.metadata.get("answer_aliases", [])
-            acc = answer_accuracy(prediction, ground_truth, aliases)
+            acc = answer_accuracy(answer_text, ground_truth, aliases)
 
             detail = {
                 "question_id": question.id,
                 "question": question.text,
                 "ground_truth": ground_truth,
-                "prediction": prediction,
+                "answer": answer_text,
+                "retrieved_documents": [
+                    {
+                        "rank": doc.get("rank", idx + 1),
+                        "score": round(doc.get("score", 0.0), 4),
+                        "text": doc.get("text", ""),
+                    }
+                    for idx, doc in enumerate(retrieved_documents)
+                ],
                 "confidence": confidence,
                 "exact_match": em,
                 "f1_score": f1,

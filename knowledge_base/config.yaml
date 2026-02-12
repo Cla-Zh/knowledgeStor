@@ -17,21 +17,21 @@ system:
 api:
   # Embedding 模型 API
   embedding:
-    api_key: 'sk-xxx'                              # 替换为你的 API Key
-    base_url: 'https://api.openai.com/v1'          # API 基础 URL
-    model: 'text-embedding-3-small'                # Embedding 模型名称
+    api_key: 'sk-171f321bbaff4c53a706117c733f0adf'                              # 替换为你的 API Key
+    base_url: 'https://dashscope.aliyuncs.com/compatible-mode/v1'          # API 基础 URL
+    model: 'text-embedding-v4'                # Embedding 模型名称
     dimension: 1536                                # 向量维度（需与模型匹配）
-    batch_size: 64                                 # 每次 API 调用的最大文本数
+    batch_size: 10                                 # 每次 API 调用的最大文本数（DashScope 限制不超过 10）
     max_retries: 3                                 # API 调用失败重试次数
     timeout: 60                                    # 请求超时时间（秒）
 
   # 生成/推理模型 API（用于答案生成、语义解析增强等）
   chat:
-    api_key: 'sk-xxx'                              # 替换为你的 API Key
-    base_url: 'https://api.openai.com/v1'          # API 基础 URL
-    model: 'gpt-4o-mini'                           # Chat 模型名称
+    api_key: 'sk-49da512700c04be686512528ae09184a'                              # 替换为你的 API Key
+    base_url: 'https://api.deepseek.com'          # API 基础 URL
+    model: 'deepseek-chat'                           # Chat 模型名称
     temperature: 0.0                               # 生成温度（0 = 确定性）
-    max_tokens: 512                                # 最大生成 token 数
+    max_tokens: 2048                               # 最大生成 token 数
     max_retries: 3
     timeout: 60
 
@@ -40,6 +40,9 @@ retrieval:
   rerank: true
   hybrid_alpha: 0.7        # 向量检索权重 (1 - alpha 为图谱检索权重)
   similarity_threshold: 0.3
+
+evaluation:
+  top_k: 5                   # 评估结果中展示的召回文档数量（按相关度排序）
 
 reasoning:
   max_hops: 5
@@ -62,3 +65,11 @@ vector_index:
 graph:
   max_path_length: 3
   min_confidence: 0.5
+
+  # LLM 驱动的三元组抽取配置
+  # 当数据集缺少结构化关系（如 MilitaryData 纯文本）时自动启用
+  triple_extraction:
+    enabled: true                # 是否启用 LLM 三元组抽取
+    max_workers: 3               # 并发调用 LLM 的线程数
+    max_chunk_chars: 2000        # 每个文本块的最大字符数
+    chunk_overlap: 200           # 文本块之间的重叠字符数

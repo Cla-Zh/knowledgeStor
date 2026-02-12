@@ -27,9 +27,9 @@ def normalize_answer(text: str) -> str:
     """
     归一化答案文本
 
-    对齐 HotpotQA / SQuAD 官方评估脚本的处理方式：
+    对齐 HotpotQA / SQuAD 官方评估脚本的处理方式，并增强中文支持：
     1. 转小写
-    2. 移除标点符号
+    2. 移除标点符号（包括中文标点）
     3. 移除冠词 (a, an, the)
     4. 合并多余空格
 
@@ -45,8 +45,12 @@ def normalize_answer(text: str) -> str:
     # 转小写
     text = text.lower()
 
-    # 移除标点
+    # 移除英文标点
     text = text.translate(str.maketrans("", "", string.punctuation))
+
+    # 移除中文标点
+    chinese_punctuation = "，。！？、；：""''（）【】《》〈〉「」『』…—～·"
+    text = text.translate(str.maketrans("", "", chinese_punctuation))
 
     # 移除冠词
     text = re.sub(r"\b(a|an|the)\b", " ", text)
@@ -58,8 +62,48 @@ def normalize_answer(text: str) -> str:
 
 
 def _get_tokens(text: str) -> List[str]:
-    """将归一化后的文本转为 token 列表"""
-    return normalize_answer(text).split()
+    """
+    将归一化后的文本转为 token 列表
+
+    对中文文本按字符切分（因为中文无空格分词），
+    对英文/数字按空格切分。
+    """
+    normalized = normalize_answer(text)
+    if not normalized:
+        return []
+
+    # 检测是否包含中文字符
+    has_chinese = any('\u4e00' <= ch <= '\u9fff' for ch in normalized)
+    if has_chinese:
+        # 中文文本：按字符切分（中文字符逐字，英文/数字按连续块）
+        tokens = []
+        current_ascii = []
+        for ch in normalized:
+            if '\u4e00' <= ch <= '\u9fff':
+                # 先输出累积的 ASCII token
+                if current_ascii:
+                    token = "".join(current_ascii).strip()
+                    if token:
+                        tokens.append(token)
+                    current_ascii = []
+                tokens.append(ch)
+            elif ch == ' ':
+                if current_ascii:
+                    token = "".join(current_ascii).strip()
+                    if token:
+                        tokens.append(token)
+                    current_ascii = []
+            else:
+                current_ascii.append(ch)
+        # 处理剩余的 ASCII 字符
+        if current_ascii:
+            token = "".join(current_ascii).strip()
+            if token:
+                tokens.append(token)
+        return tokens
+    else:
+        # 纯英文文本：按空格切分
+        return normalized.split()
 
 
 # ==============================================================================

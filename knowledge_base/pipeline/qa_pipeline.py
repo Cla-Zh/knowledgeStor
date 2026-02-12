@@ -172,6 +172,23 @@ class QAPipeline:
         answer.metadata["reasoning_strategy"] = analysis.reasoning_strategy
         answer.metadata["total_hops"] = reasoning_result.total_hops
 
+        # 保存检索到的文档（按相关度排序），供评估时输出
+        sorted_results = sorted(
+            reasoning_result.retrieved_results,
+            key=lambda r: r.score,
+            reverse=True,
+        )
+        answer.metadata["retrieved_documents"] = [
+            {
+                "rank": i + 1,
+                "score": r.score,
+                "text": r.text,
+                "source": r.source,
+                "metadata": r.metadata,
+            }
+            for i, r in enumerate(sorted_results)
+        ]
+
         logger.info(
             f"  答案: '{answer.text[:60]}...', "
             f"conf={answer.confidence:.2f}, "

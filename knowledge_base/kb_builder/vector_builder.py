@@ -131,12 +131,24 @@ class VectorIndexBuilder:
         if not texts:
             return np.array([], dtype=np.float32).reshape(0, self.dimension)
 
+        # 限制 batch_size 不超过 API 允许的最大值（DashScope 限制 10）
+        effective_batch_size = min(self.batch_size, 10)
+        if effective_batch_size != self.batch_size:
+            logger.warning(
+                f"batch_size={self.batch_size} 超过 API 限制，"
+                f"自动调整为 {effective_batch_size}"
+            )
+
         # 分批调用 API
-        all_embeddings = []
+        all_embeddings: List[Optional[List[float]]] = []
+        detected_dim: Optional[int] = None  # 从成功响应中检测的实际维度
         batches = [
-            texts[i:i + self.batch_size]
-            for i in range(0, len(texts), self.batch_size)
+            texts[i:i + effective_batch_size]
+            for i in range(0, len(texts), effective_batch_size)
         ]
+
+        # 记录失败批次的位置，后续用实际维度回填
+        failed_indices: List[int] = []  # all_embeddings 中需要回填的起始下标
 
         iterator = batches
         if show_progress:
@@ -161,13 +173,39 @@ class VectorIndexBuilder:
                 batch_embeddings = [
                     item.embedding for item in response.data
                 ]
+
+                # 从第一次成功响应中检测实际维度
+                if detected_dim is None and batch_embeddings:
+                    detected_dim = len(batch_embeddings[0])
+                    if detected_dim != self.dimension:
+                        logger.info(
+                            f"API 返回的实际维度={detected_dim}，"
+                            f"与配置维度={self.dimension} 不同，以 API 为准"
+                        )
+
                 all_embeddings.extend(batch_embeddings)
 
             except Exception as e:
                 logger.error(f"Embedding API 调用失败: {e}")
-                # 出错时填充零向量，确保维度对齐
+                # 先用 None 占位，等后续得到真实维度后回填
+                start_idx = len(all_embeddings)
                 for _ in cleaned:
-                    all_embeddings.append([0.0] * self.dimension)
+                    failed_indices.append(start_idx)
+                    all_embeddings.append(None)
+                    start_idx += 1
+
+        # 确定最终维度：优先使用 API 返回的实际维度
+        final_dim = detected_dim if detected_dim is not None else self.dimension
+
+        # 回填失败的占位向量
+        if failed_indices:
+            logger.warning(
+                f"共 {len(failed_indices)} 条文本 Embedding 失败，"
+                f"使用维度={final_dim} 的零向量填充"
+            )
+            zero_vec = [0.0] * final_dim
+            for idx in failed_indices:
+                all_embeddings[idx] = zero_vec
 
         result = np.array(all_embeddings, dtype=np.float32)
 

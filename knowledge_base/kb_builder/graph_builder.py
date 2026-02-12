@@ -437,16 +437,23 @@ class KnowledgeGraphBuilder:
 
         操作：
         1. 移除孤立节点（没有任何边的节点）
+           - 仅当图中存在边时才移除孤立节点，否则保留所有实体用于实体名称检索
         2. 统计连通分量信息
 
         Args:
             kg: 知识图谱实例
         """
-        # 移除孤立节点
-        isolated = list(nx.isolates(kg.graph))
-        if isolated:
-            kg.graph.remove_nodes_from(isolated)
-            logger.info(f"  移除了 {len(isolated)} 个孤立节点")
+        # 移除孤立节点（仅在图中有边时执行，避免无关系数据集丢失全部实体）
+        if kg.graph.number_of_edges() > 0:
+            isolated = list(nx.isolates(kg.graph))
+            if isolated:
+                kg.graph.remove_nodes_from(isolated)
+                logger.info(f"  移除了 {len(isolated)} 个孤立节点")
+        else:
+            logger.info(
+                f"  图中无边（关系），保留全部 {kg.graph.number_of_nodes()} 个实体节点"
+                f"（可用于实体名称检索）"
+            )
 
         # 统计弱连通分量
         if kg.num_entities > 0:

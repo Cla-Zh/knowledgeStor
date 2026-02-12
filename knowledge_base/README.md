@@ -121,22 +121,28 @@ api:
 
 ### 3. 准备数据集
 
-将数据集放到 `data/raw/` 目录下：
+将数据集放到 `data/` 目录下：
 
 ```
-data/raw/
-├── 2wikimultihopqa/
-│   ├── train.json
-│   ├── dev.json
-│   └── test.json
-└── musique/
-    ├── train.jsonl
-    ├── dev.jsonl
-    └── test.jsonl
+data/
+├── raw/                            # 英文数据集
+│   ├── 2wikimultihopqa/
+│   │   ├── train.json
+│   │   ├── dev.json
+│   │   └── test.json
+│   └── musique/
+│       ├── train.jsonl
+│       ├── dev.jsonl
+│       └── test.jsonl
+└── MilitaryData/                   # 中文军事数据集
+    ├── input/                      # 知识库文章
+    │   └── *.json
+    └── test.json                   # 测试集
 ```
 
 - **2WikiMultihopQA**: [下载地址](https://github.com/Alab-NII/2wikimultihop)
 - **MuSiQue**: [下载地址](https://github.com/StonyBrookNLP/musique)
+- **MilitaryData**: 中文军事领域数据集，放置在 `data/MilitaryData/` 下
 
 ### 4. 构建知识库
 
@@ -326,6 +332,7 @@ for step in answer.reasoning_path:
 |--------|------|------|
 | **2WikiMultihopQA** | JSON | 基于维基百科的多跳问答，含证据链和支撑事实 |
 | **MuSiQue** | JSONL | 多步推理问答，含问题分解结构 |
+| **MilitaryData** | JSON | 中文军事领域知识库，含多跳推理测试集 |
 
 系统通过 `DatasetLoader` 自动检测数据集格式，也可以通过 `--dataset-type` 手动指定。
 
@@ -341,13 +348,143 @@ python main.py --help
 |------|------|----------|
 | `--mode` | 运行模式 (必填) | 全部 |
 | `--dataset` | 数据集路径 | build, eval |
-| `--dataset-type` | 数据集类型 (`2wiki` / `musique`) | build, eval |
+| `--dataset-type` | 数据集类型 (`2wiki` / `musique` / `military`) | build, eval |
 | `--question` | 问题文本 | query |
 | `--config` | 配置文件路径，默认 `config.yaml` | 全部 |
 | `--kb-path` | 知识库路径，默认 `./data/knowledge_bases` | query, eval, interactive |
 | `--max-samples` | 限制样本数（调试用） | build, eval |
 | `--output` | 评估结果输出路径 | eval |
 | `--log-level` | 日志级别 (`DEBUG`/`INFO`/`WARNING`/`ERROR`) | 全部 |
+
+---
+
+## MilitaryData 数据集使用说明
+
+### 数据集结构
+
+```
+data/MilitaryData/
+├── input/                          # 知识库原始文章（构建用）
+│   ├── military_pages-part-00000-xxx.json
+│   ├── military_pages-part-00001-xxx.json
+│   ├── military_pages-part-00002-xxx.json
+│   └── military_pages-part-00003-xxx.json
+└── test.json                       # 测试集（评估用，含问题和标准答案）
+```
+
+### 数据格式
+
+**知识库文章** (`input/*.json`)：
+
+```json
+[
+    {
+        "id": 1,
+        "text": "标题: 2025年中国国防预算增长7.2%\n根据3月5日公布的...",
+        "metadata": { "lang": "zh-CN" }
+    },
+    ...
+]
+```
+
+每篇文章包含 `text`（全文，标题通常以 "标题:" 开头）和 `metadata`（语言等信息）。
+
+**测试集** (`test.json`)：
+
+```json
+[
+    {
+        "question": "2019年，巴基斯坦击落了一架米格-21Bison战机...",
+        "answer": ["8735"],
+        "chunk_titles": ["标题: xxx", ...]   // 可选，参考用的相关文章标题
+    },
+    ...
+]
+```
+
+- `answer` 字段可以是字符串或字符串数组（数组时第一个为标准答案，其余为别名）
+- `chunk_titles` 为该问题涉及的相关文档标题（可选，用于辅助评估分析）
+- `description` 为问题设计说明（可选）
+
+### 使用步骤
+
+#### 1. 构建知识库
+
+将 `input/` 目录下的文章作为知识库源，构建分布式专家知识库：
+
+```bash
+python main.py --mode build \
+    --dataset data/MilitaryData/input/ \
+    --dataset-type military
+```
+
+构建流程会自动：
+1. 加载所有文章并提取标题
+2. 使用文章内容进行领域聚类，识别专家领域
+3. 为每个专家构建向量索引（FAISS）和知识图谱（NetworkX）
+4. 保存到 `data/knowledge_bases/`
+
+**调试模式**（限制文章数量加速测试）：
+
+```bash
+python main.py --mode build \
+    --dataset data/MilitaryData/input/ \
+    --dataset-type military \
+    --max-samples 500
+```
+
+#### 2. 评估
+
+使用 `test.json` 中的测试问题评估系统性能：
+
+```bash
+python main.py --mode eval \
+    --dataset data/MilitaryData/test.json \
+    --dataset-type military \
+    --output military_eval_results.json
+```
+
+评估会对每个测试问题：
+1. 通过知识库检索召回相关文档
+2. 利用多跳推理生成答案
+3. 将生成答案与 `test.json` 中的标准答案对比
+
+输出的评估指标包括：
+- **Exact Match (EM)** — 精确匹配率（归一化后完全一致）
+- **F1 Score** — Token 级 F1 分数（支持中文字符级切分）
+- **Answer Accuracy** — 答案准确率（支持别名匹配和部分匹配）
+
+**限制评估数量**：
+
+```bash
+python main.py --mode eval \
+    --dataset data/MilitaryData/test.json \
+    --dataset-type military \
+    --max-samples 10 \
+    --output military_eval_results.json
+```
+
+#### 3. 交互式问答
+
+构建知识库后，可以交互式提问军事相关问题：
+
+```bash
+python main.py --mode interactive
+```
+
+#### 4. 单题问答
+
+```bash
+python main.py --mode query \
+    --question "2019年巴基斯坦击落了什么型号的战机？"
+```
+
+### 注意事项
+
+- MilitaryData 为**中文**数据集，评估指标已针对中文进行适配（中文标点移除、字符级 Token 切分）
+- 知识库文章可能较长，向量检索效果取决于 Embedding 模型对中文长文本的支持
+- 测试集问题多为**复杂多跳推理**类型，涉及事件链、地理关联、人物关系等
+- 如果自动检测数据集类型失败，可手动指定 `--dataset-type military`
 
 ---
 
@@ -387,7 +524,7 @@ python main.py --help
 
 ### 添加新的数据集
 
-在 `data/loader.py` 中新增加载方法：
+在 `data/loader.py` 中新增加载方法，并在 `load()` 和 `_detect_dataset_type()` 中注册：
 
 ```python
 class DatasetLoader:
@@ -395,6 +532,11 @@ class DatasetLoader:
         # 实现加载逻辑，返回 Question 列表
         ...
 ```
+
+**已支持的数据集加载方法**：
+- `load_2wiki()` — 2WikiMultihopQA 数据集
+- `load_musique()` — MuSiQue 数据集
+- `load_military()` — MilitaryData 军事数据集（自动区分文章/测试题格式）
 
 ### 自定义专家类型
 

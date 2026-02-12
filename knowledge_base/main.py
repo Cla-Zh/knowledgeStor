@@ -151,9 +151,9 @@ def main():
     parser.add_argument(
         "--dataset-type",
         type=str,
-        choices=["2wiki", "musique"],
+        choices=["2wiki", "musique", "military"],
         default=None,
-        help="数据集类型，默认自动检测",
+        help="数据集类型 (2wiki/musique/military)，默认自动检测",
     )
     parser.add_argument(
         "--question",
