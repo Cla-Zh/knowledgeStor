@@ -165,10 +165,11 @@ class AnswerGenerator:
         """
         生成最终答案
 
-        决策流程：
+        决策流程（优先级从高到低）：
         1. 如果推理结果有符号推理得到的精确答案 → 直接返回
-        2. 如果有检索结果 → 抽取式回答
-        3. 调用 Chat API → 生成式回答
+        2. 调用 Chat API → 生成式回答（简短精准）
+        3. 如果有检索结果 → 抽取式回答
+        4. 回退：返回最佳检索结果
 
         Args:
             analysis: 问题分析结果
@@ -195,18 +196,7 @@ class AnswerGenerator:
             logger.debug(f"  符号答案: {answer.text}")
             return answer
 
-        # 策略 2: 抽取式答案
-        answer = self._try_extractive_answer(question, reasoning_result)
-        if answer:
-            answer.supporting_facts = supporting_facts
-            answer.reasoning_path = reasoning_path
-            answer.explanation = self._generate_explanation(
-                question, answer.text, reasoning_path
-            )
-            logger.debug(f"  抽取式答案: {answer.text[:50]}...")
-            return answer
-
-        # 策略 3: 生成式答案（通过 Chat API）
+        # 策略 2: 生成式答案（优先级提高，确保答案简短精准）
         answer = self._try_generative_answer(question, reasoning_result)
         if answer:
             answer.supporting_facts = supporting_facts
@@ -217,18 +207,25 @@ class AnswerGenerator:
             logger.debug(f"  生成式答案: {answer.text[:50]}...")
             return answer
 
-        # 回退：返回最佳检索结果
-        fallback_text = reasoning_result.answer or ""
-        if not fallback_text and reasoning_result.retrieved_results:
-            fallback_text = reasoning_result.retrieved_results[0].text
+        # 策略 3: 抽取式答案（作为后备）
+        answer = self._try_extractive_answer(question, reasoning_result)
+        if answer:
+            answer.supporting_facts = supporting_facts
+            answer.reasoning_path = reasoning_path
+            answer.explanation = self._generate_explanation(
+                question, answer.text, reasoning_path
+            )
+            logger.debug(f"  抽取式答案: {answer.text[:50]}...")
+            return answer
 
+        # 回退：返回简短的错误信息
         return Answer(
-            text=fallback_text,
-            confidence=reasoning_result.confidence * 0.5,
+            text="无法确定",
+            confidence=reasoning_result.confidence * 0.3,
             supporting_facts=supporting_facts,
             reasoning_path=reasoning_path,
             explanation=self._generate_explanation(
-                question, fallback_text, reasoning_path
+                question, "无法确定", reasoning_path
             ),
             source="fallback",
         )
@@ -391,7 +388,7 @@ class AnswerGenerator:
     def _try_generative_answer(self, question: str,
                                 reasoning_result: ReasoningResult) -> Optional[Answer]:
         """
-        通过 OpenAI 兼容 Chat API 生成答案
+        通过 OpenAI 兼容 Chat API 生成简短精准的答案
 
         Args:
             question: 问题
@@ -403,22 +400,22 @@ class AnswerGenerator:
         if not reasoning_result.retrieved_results:
             return None
 
-        # 构建上下文
+        # 构建上下文（取前 5 个最相关的检索结果）
         context_parts = []
         for r in reasoning_result.retrieved_results[:5]:
             if r.text:
                 context_parts.append(r.text)
-        context = "\n".join(context_parts)
+        context = "\n\n".join(context_parts)
 
         if not context:
             return None
 
-        # 通过 Chat API 生成
+        # 通过 Chat API 生成简短精准答案
         generated = self._generate_with_api(question, context)
         if generated:
             return Answer(
                 text=generated,
-                confidence=reasoning_result.confidence * 0.8,
+                confidence=reasoning_result.confidence * 0.85,
                 source="generative",
             )
 
@@ -426,7 +423,9 @@ class AnswerGenerator:
 
     def _generate_with_api(self, question: str, context: str) -> str:
         """
-        调用 OpenAI Chat API 生成答案
+        调用 OpenAI Chat API 生成简短精准的答案
+
+        强调：答案必须简短精准（如数值、实体名称、短语等），不要冗长解释。
 
         Args:
             question: 问题
@@ -438,33 +437,52 @@ class AnswerGenerator:
         try:
             client = self._get_client()
 
-            # 构造 system prompt 和 user prompt
+            # 针对中文军事多跳问答优化的 prompt
             system_prompt = (
-                "You are a precise question-answering assistant. "
-                "Answer the question based ONLY on the provided context. "
-                "Give a concise and direct answer. "
-                "If the context does not contain enough information, "
-                "say 'I cannot determine the answer from the given context.'"
+                "你是一个精准的问答助手。请**严格**根据提供的文档回答问题。\n"
+                "要求：\n"
+                "1. 答案必须**简短精准**：只返回答案本身（数字、名称、短语等），不要额外解释\n"
+                "2. 如果答案是数值，直接返回数值和单位（如 \"8735米\"、\"20架\"）\n"
+                "3. 如果答案是名称，只返回名称本身（如 \"艾森豪威尔号\"、\"杰森·黑格\"）\n"
+                "4. 如果答案是日期，使用简短格式（如 \"2022年\"、\"4月1日\"）\n"
+                "5. **严禁**返回完整段落或文档内容\n"
+                "6. 如果无法从文档中确定答案，返回 \"无法确定\""
             )
 
             user_prompt = (
-                f"Context:\n{context[:3000]}\n\n"
-                f"Question: {question}\n\n"
-                f"Answer:"
+                f"参考文档：\n{context[:4000]}\n\n"
+                f"问题：{question}\n\n"
+                f"请给出简短精准的答案（只回答答案本身，不要额外解释）："
             )
 
-            response = client.chat.completions.create(
-                model=self.model,
-                messages=[
+            # 检测是否为 DeepSeek 模型
+            is_deepseek = "deepseek" in self.base_url.lower() or "deepseek" in self.model.lower()
+            
+            api_kwargs = {
+                "model": self.model,
+                "messages": [
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt},
                 ],
-                temperature=self.temperature,
-                max_tokens=self.max_tokens,
-            )
+                "temperature": self.temperature,
+                "max_tokens": 100,  # 限制为 100 tokens，强制简短答案
+            }
+
+            # DeepSeek 专用：禁用思考模式
+            if is_deepseek:
+                api_kwargs["extra_body"] = {"enable_thinking": False}
+
+            response = client.chat.completions.create(**api_kwargs)
 
             answer = response.choices[0].message.content
-            return answer.strip() if answer else ""
+            if not answer:
+                return ""
+
+            # 去除可能的思考标签
+            if "</think>" in answer:
+                answer = answer.split("</think>")[-1].strip()
+
+            return answer.strip()
 
         except Exception as e:
             logger.warning(f"Chat API 生成答案失败: {e}")
