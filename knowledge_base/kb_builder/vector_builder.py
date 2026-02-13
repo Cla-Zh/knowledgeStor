@@ -165,6 +165,15 @@ class VectorIndexBuilder:
             cleaned = [t.strip()[:8000] if t.strip() else " " for t in batch_texts]
 
             try:
+                # 添加请求详情日志（仅首次）
+                if len(all_embeddings) == 0:
+                    logger.info(
+                        f"首次 Embedding 请求: "
+                        f"texts_count={len(cleaned)}, "
+                        f"first_text_len={len(cleaned[0])}, "
+                        f"model={self.model}"
+                    )
+                
                 response = client.embeddings.create(
                     input=cleaned,
                     model=self.model,
@@ -210,6 +219,40 @@ class VectorIndexBuilder:
                     f"  批次大小: {error_details['api_config']['batch_size']}\n"
                     f"  首条文本: {error_details['batch_info']['first_text_preview']}"
                 )
+                
+                # 尝试单条请求来诊断问题
+                if len(cleaned) > 1:
+                    logger.info("  尝试单条请求进行诊断...")
+                    try:
+                        test_response = client.embeddings.create(
+                            input=[cleaned[0]],
+                            model=self.model,
+                        )
+                        logger.info(f"  单条请求成功！问题可能是批量请求不支持")
+                        # 降级为单条逐个请求
+                        batch_embeddings = []
+                        for single_text in cleaned:
+                            try:
+                                single_resp = client.embeddings.create(
+                                    input=[single_text],
+                                    model=self.model,
+                                )
+                                batch_embeddings.append(single_resp.data[0].embedding)
+                            except:
+                                batch_embeddings.append(None)
+                                failed_indices.append(len(all_embeddings) + len(batch_embeddings) - 1)
+                        
+                        # 过滤掉 None
+                        for emb in batch_embeddings:
+                            if emb is not None:
+                                if detected_dim is None:
+                                    detected_dim = len(emb)
+                                all_embeddings.append(emb)
+                            else:
+                                all_embeddings.append(None)
+                        continue  # 跳过下面的失败处理
+                    except Exception as single_e:
+                        logger.error(f"  单条请求也失败: {type(single_e).__name__}: {single_e}")
                 
                 # 先用 None 占位，等后续得到真实维度后回填
                 start_idx = len(all_embeddings)
