@@ -225,7 +225,31 @@ class TripleExtractor:
             return triples
 
         except Exception as e:
-            logger.error(f"LLM 三元组抽取调用失败: {e}")
+            # 详细的错误信息
+            error_details = {
+                "error_type": type(e).__name__,
+                "error_message": str(e),
+                "api_config": {
+                    "base_url": self.base_url,
+                    "model": self.model,
+                    "max_tokens": self.max_tokens,
+                    "is_deepseek": self._is_deepseek,
+                },
+                "text_info": {
+                    "text_preview": text[:200] + "..." if len(text) > 200 else text,
+                    "text_length": len(text),
+                }
+            }
+            
+            logger.error(
+                f"LLM 三元组抽取调用失败:\n"
+                f"  错误类型: {error_details['error_type']}\n"
+                f"  错误信息: {error_details['error_message']}\n"
+                f"  API 地址: {error_details['api_config']['base_url']}\n"
+                f"  模型名称: {error_details['api_config']['model']}\n"
+                f"  文本长度: {error_details['text_info']['text_length']} 字符\n"
+                f"  文本预览: {error_details['text_info']['text_preview']}"
+            )
             return []
 
     def _parse_llm_response(self, content: str) -> List[Dict[str, str]]:

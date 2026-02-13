@@ -186,7 +186,31 @@ class VectorIndexBuilder:
                 all_embeddings.extend(batch_embeddings)
 
             except Exception as e:
-                logger.error(f"Embedding API 调用失败: {e}")
+                # 详细的错误信息
+                error_details = {
+                    "error_type": type(e).__name__,
+                    "error_message": str(e),
+                    "api_config": {
+                        "base_url": self.base_url,
+                        "model": self.model,
+                        "batch_size": len(batch_texts),
+                    },
+                    "batch_info": {
+                        "first_text_preview": batch_texts[0][:100] + "..." if batch_texts else "",
+                        "texts_count": len(batch_texts),
+                    }
+                }
+                
+                logger.error(
+                    f"Embedding API 调用失败:\n"
+                    f"  错误类型: {error_details['error_type']}\n"
+                    f"  错误信息: {error_details['error_message']}\n"
+                    f"  API 地址: {error_details['api_config']['base_url']}\n"
+                    f"  模型名称: {error_details['api_config']['model']}\n"
+                    f"  批次大小: {error_details['api_config']['batch_size']}\n"
+                    f"  首条文本: {error_details['batch_info']['first_text_preview']}"
+                )
+                
                 # 先用 None 占位，等后续得到真实维度后回填
                 start_idx = len(all_embeddings)
                 for _ in cleaned:

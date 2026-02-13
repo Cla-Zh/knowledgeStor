@@ -485,7 +485,30 @@ class AnswerGenerator:
             return answer.strip()
 
         except Exception as e:
-            logger.warning(f"Chat API 生成答案失败: {e}")
+            # 详细的错误信息
+            error_details = {
+                "error_type": type(e).__name__,
+                "error_message": str(e),
+                "api_config": {
+                    "base_url": self.base_url,
+                    "model": self.model,
+                    "max_tokens": 100,
+                },
+                "request_info": {
+                    "question": question[:100] + "..." if len(question) > 100 else question,
+                    "context_length": len(context),
+                }
+            }
+            
+            logger.error(
+                f"Chat API 生成答案失败:\n"
+                f"  错误类型: {error_details['error_type']}\n"
+                f"  错误信息: {error_details['error_message']}\n"
+                f"  API 地址: {error_details['api_config']['base_url']}\n"
+                f"  模型名称: {error_details['api_config']['model']}\n"
+                f"  问题: {error_details['request_info']['question']}\n"
+                f"  上下文长度: {error_details['request_info']['context_length']} 字符"
+            )
             return ""
 
     # ==========================================
