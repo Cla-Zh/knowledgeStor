@@ -21,7 +21,7 @@ api:
     base_url: 'https://dashscope.aliyuncs.com/compatible-mode/v1'          # API 基础 URL
     model: 'text-embedding-v4'                # Embedding 模型名称
     dimension: 1536                                # 向量维度（需与模型匹配）
-    batch_size: 10                                 # 每次 API 调用的最大文本数（DashScope 限制不超过 10）
+    # batch_size: 10                               # [已废弃] 现在每次只处理一条文本
     max_retries: 3                                 # API 调用失败重试次数
     timeout: 60                                    # 请求超时时间（秒）
 

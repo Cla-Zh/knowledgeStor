@@ -36,7 +36,7 @@ DEFAULT_CONFIG = {
             "base_url": "https://api.openai.com/v1",
             "model": "text-embedding-3-small",
             "dimension": 1536,
-            "batch_size": 64,
+            # batch_size 已废弃，现在每次只处理一条文本
             "max_retries": 3,
             "timeout": 60,
         },

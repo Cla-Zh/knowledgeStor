@@ -5,7 +5,7 @@
 
 核心流程：
 1. 通过 OpenAI 兼容 API 调用 Embedding 模型
-2. 文本批量向量化
+2. 文本逐条向量化（每次请求处理一条文本）
 3. 构建 FAISS 索引（支持快速相似度搜索）
 4. 保存/加载索引和元数据
 
@@ -36,7 +36,8 @@ class VectorIndexBuilder:
 
     通过 OpenAI 兼容 API 将文本向量化并构建检索索引，支持：
     - 任意 OpenAI 兼容的 Embedding API
-    - 自动批量处理与重试
+    - 每次处理一条文本（避免批量调用问题）
+    - 自动重试机制
     - FAISS / numpy 索引
 
     Usage:
@@ -71,7 +72,6 @@ class VectorIndexBuilder:
         self.base_url = config.get("api.embedding.base_url", "https://api.openai.com/v1")
         self.model = config.get("api.embedding.model", "text-embedding-3-small")
         self.dimension = config.get("api.embedding.dimension", 1536)
-        self.batch_size = config.get("api.embedding.batch_size", 64)
         self.max_retries = config.get("api.embedding.max_retries", 3)
         self.timeout = config.get("api.embedding.timeout", 60)
 
@@ -186,6 +186,7 @@ class VectorIndexBuilder:
                show_progress: bool = False) -> np.ndarray:
         """
         将文本编码为向量（通过 API 调用）
+        每次只处理一条文本
 
         Args:
             texts: 单个文本或文本列表
@@ -200,68 +201,51 @@ class VectorIndexBuilder:
         if not texts:
             return np.array([], dtype=np.float32).reshape(0, self.dimension)
 
-        # 限制 batch_size 不超过 API 允许的最大值（DashScope 限制 10）
-        effective_batch_size = min(self.batch_size, 10)
-        if effective_batch_size != self.batch_size:
-            logger.warning(
-                f"batch_size={self.batch_size} 超过 API 限制，"
-                f"自动调整为 {effective_batch_size}"
-            )
-
-        # 分批调用 API
+        # 逐条调用 API
         all_embeddings: List[Optional[List[float]]] = []
         detected_dim: Optional[int] = None  # 从成功响应中检测的实际维度
-        batches = [
-            texts[i:i + effective_batch_size]
-            for i in range(0, len(texts), effective_batch_size)
-        ]
+        failed_indices: List[int] = []  # all_embeddings 中需要回填的下标
 
-        # 记录失败批次的位置，后续用实际维度回填
-        failed_indices: List[int] = []  # all_embeddings 中需要回填的起始下标
-
-        iterator = batches
+        iterator = texts
         if show_progress:
             try:
                 from tqdm import tqdm
-                iterator = tqdm(batches, desc="Embedding API 调用")
+                iterator = tqdm(texts, desc="Embedding API 调用")
             except ImportError:
                 pass
 
         client = self._get_client()
 
-        for batch_texts in iterator:
+        for idx, text in enumerate(iterator):
             # 清理文本：去除空字符串，截断过长文本
-            cleaned = [t.strip()[:8000] if t.strip() else " " for t in batch_texts]
+            cleaned_text = text.strip()[:8000] if text.strip() else " "
 
             try:
                 # 添加请求详情日志（仅首次）
-                if len(all_embeddings) == 0:
+                if idx == 0:
                     logger.info(
                         f"首次 Embedding 请求: "
-                        f"texts_count={len(cleaned)}, "
-                        f"first_text_len={len(cleaned[0])}, "
+                        f"text_len={len(cleaned_text)}, "
                         f"model={self.model}"
                     )
                 
                 response = client.embeddings.create(
-                    input=cleaned,
+                    input=[cleaned_text],  # 每次只传入一条文本
                     model=self.model,
                 )
 
-                batch_embeddings = [
-                    item.embedding for item in response.data
-                ]
+                embedding = response.data[0].embedding
 
                 # 从第一次成功响应中检测实际维度
-                if detected_dim is None and batch_embeddings:
-                    detected_dim = len(batch_embeddings[0])
+                if detected_dim is None:
+                    detected_dim = len(embedding)
                     if detected_dim != self.dimension:
                         logger.info(
                             f"API 返回的实际维度={detected_dim}，"
                             f"与配置维度={self.dimension} 不同，以 API 为准"
                         )
 
-                all_embeddings.extend(batch_embeddings)
+                all_embeddings.append(embedding)
 
             except Exception as e:
                 # 详细的错误信息
@@ -273,11 +257,10 @@ class VectorIndexBuilder:
                     "api_config": {
                         "base_url": self.base_url,
                         "model": self.model,
-                        "batch_size": len(batch_texts),
                     },
-                    "batch_info": {
-                        "first_text_preview": batch_texts[0][:100] + "..." if batch_texts else "",
-                        "texts_count": len(batch_texts),
+                    "text_info": {
+                        "text_preview": cleaned_text[:100] + "..." if len(cleaned_text) > 100 else cleaned_text,
+                        "text_len": len(cleaned_text),
                     }
                 }
                 
@@ -288,13 +271,10 @@ class VectorIndexBuilder:
                     "Authorization": f"Bearer {self.api_key}"
                 }
                 
-                # 请求体 - 限制显示的文本数量和长度
-                display_cleaned = [
-                    text[:100] + "..." if len(text) > 100 else text 
-                    for text in cleaned[:3]  # 最多显示前3条
-                ]
+                # 请求体
+                display_text = cleaned_text[:100] + "..." if len(cleaned_text) > 100 else cleaned_text
                 request_body = {
-                    "input": display_cleaned,
+                    "input": [display_text],
                     "model": self.model
                 }
                 
@@ -303,7 +283,7 @@ class VectorIndexBuilder:
                 
                 # 生成等效的 curl 命令
                 full_request_body = {
-                    "input": cleaned,
+                    "input": [cleaned_text],
                     "model": self.model
                 }
                 curl_command = self._generate_curl_command(
@@ -314,66 +294,28 @@ class VectorIndexBuilder:
                 
                 # 输出详细错误信息
                 logger.error(
-                    f"Embedding API 调用失败:\n"
+                    f"Embedding API 调用失败 (文本索引 {idx}):\n"
                     f"  错误类型: {error_details['error_type']}\n"
                     f"  错误信息: {error_details['error_message']}\n"
                     f"  API 地址: {error_details['api_config']['base_url']}\n"
                     f"  模型名称: {error_details['api_config']['model']}\n"
-                    f"  批次大小: {error_details['api_config']['batch_size']}\n"
-                    f"  首条文本: {error_details['batch_info']['first_text_preview']}\n"
+                    f"  文本预览: {error_details['text_info']['text_preview']}\n"
                     f"\n"
                     f"  === 完整请求信息 ===\n"
                     f"  URL: {request_url}\n"
                     f"  Headers:\n"
                     f"    Content-Type: application/json\n"
                     f"    Authorization: Bearer {self.api_key[:15]}...{self.api_key[-8:] if len(self.api_key) > 25 else ''}\n"
-                    f"  Body (显示前{len(display_cleaned)}条,共{len(cleaned)}条):\n"
+                    f"  Body:\n"
                     f"{request_body_str}\n"
                     f"\n"
                     f"  === 等效调试命令 ===\n"
                     f"{curl_command}\n"
                 )
                 
-                # 尝试单条请求来诊断问题
-                if len(cleaned) > 1:
-                    logger.info("  尝试单条请求进行诊断...")
-                    try:
-                        test_response = client.embeddings.create(
-                            input=[cleaned[0]],
-                            model=self.model,
-                        )
-                        logger.info(f"  单条请求成功！问题可能是批量请求不支持")
-                        # 降级为单条逐个请求
-                        batch_embeddings = []
-                        for single_text in cleaned:
-                            try:
-                                single_resp = client.embeddings.create(
-                                    input=[single_text],
-                                    model=self.model,
-                                )
-                                batch_embeddings.append(single_resp.data[0].embedding)
-                            except:
-                                batch_embeddings.append(None)
-                                failed_indices.append(len(all_embeddings) + len(batch_embeddings) - 1)
-                        
-                        # 过滤掉 None
-                        for emb in batch_embeddings:
-                            if emb is not None:
-                                if detected_dim is None:
-                                    detected_dim = len(emb)
-                                all_embeddings.append(emb)
-                            else:
-                                all_embeddings.append(None)
-                        continue  # 跳过下面的失败处理
-                    except Exception as single_e:
-                        logger.error(f"  单条请求也失败: {type(single_e).__name__}: {single_e}")
-                
-                # 先用 None 占位，等后续得到真实维度后回填
-                start_idx = len(all_embeddings)
-                for _ in cleaned:
-                    failed_indices.append(start_idx)
-                    all_embeddings.append(None)
-                    start_idx += 1
+                # 记录失败位置，用 None 占位
+                failed_indices.append(idx)
+                all_embeddings.append(None)
 
         # 确定最终维度：优先使用 API 返回的实际维度
         final_dim = detected_dim if detected_dim is not None else self.dimension
