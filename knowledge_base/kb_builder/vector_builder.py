@@ -109,6 +109,75 @@ class VectorIndexBuilder:
 
         return self._client
 
+    def _generate_curl_command(self, url: str, headers: Dict[str, str], body: Dict) -> str:
+        """
+        生成等效的 curl 命令用于调试
+        
+        Args:
+            url: 请求 URL
+            headers: 请求头
+            body: 请求体
+            
+        Returns:
+            curl 命令字符串
+        """
+        import json
+        
+        # 构造 curl 命令
+        curl_parts = ["curl -X POST"]
+        
+        # 添加 URL
+        curl_parts.append(f'"{url}"')
+        
+        # 添加请求头
+        for key, value in headers.items():
+            # 对于 Authorization,隐藏部分 key
+            if key == "Authorization" and "Bearer" in value:
+                api_key = value.replace("Bearer ", "")
+                if len(api_key) > 30:
+                    masked_key = f"{api_key[:20]}...{api_key[-10:]}"
+                else:
+                    masked_key = api_key
+                curl_parts.append(f'-H "{key}: Bearer {masked_key}"')
+            else:
+                curl_parts.append(f'-H "{key}: {value}"')
+        
+        # 添加请求体 (只包含前2条数据用于测试)
+        test_body = body.copy()
+        if "input" in test_body and isinstance(test_body["input"], list):
+            # 只取前2条,并且限制每条文本长度
+            original_inputs = test_body["input"]
+            test_body["input"] = [
+                text[:100] + "..." if len(text) > 100 else text 
+                for text in original_inputs[:2]
+            ]
+        
+        # 生成 JSON,确保中文正常显示
+        body_json = json.dumps(test_body, ensure_ascii=False)
+        
+        # 为不同操作系统生成不同的转义格式
+        # Linux/Mac: 单引号包裹,内部双引号不需要转义
+        # Windows PowerShell: 需要特殊处理
+        import platform
+        if platform.system() == "Windows":
+            # Windows PowerShell 版本
+            body_json_escaped = body_json.replace('"', '""')
+            curl_parts.append(f"-d '{body_json}'")
+            
+            # 额外生成一个 PowerShell 版本的说明
+            ps_body = body_json.replace("'", "''")
+            ps_cmd = f"""
+  # PowerShell 版本:
+  $body = '{ps_body}'
+  Invoke-RestMethod -Uri "{url}" -Method Post -Body $body -ContentType "application/json" """
+            curl_command = " \\\n  ".join(curl_parts)
+            return curl_command + "\n" + ps_cmd
+        else:
+            # Linux/Mac 版本
+            body_json_escaped = body_json.replace("'", "'\\''")
+            curl_parts.append(f"-d '{body_json_escaped}'")
+            return " \\\n  ".join(curl_parts)
+
     # ==========================================
     # 向量编码
     # ==========================================
@@ -196,6 +265,8 @@ class VectorIndexBuilder:
 
             except Exception as e:
                 # 详细的错误信息
+                import json
+                
                 error_details = {
                     "error_type": type(e).__name__,
                     "error_message": str(e),
@@ -210,6 +281,38 @@ class VectorIndexBuilder:
                     }
                 }
                 
+                # 构造完整的请求信息用于调试
+                request_url = f"{self.base_url.rstrip('/')}/embeddings"
+                request_headers = {
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {self.api_key}"
+                }
+                
+                # 请求体 - 限制显示的文本数量和长度
+                display_cleaned = [
+                    text[:100] + "..." if len(text) > 100 else text 
+                    for text in cleaned[:3]  # 最多显示前3条
+                ]
+                request_body = {
+                    "input": display_cleaned,
+                    "model": self.model
+                }
+                
+                # 格式化 JSON
+                request_body_str = json.dumps(request_body, ensure_ascii=False, indent=2)
+                
+                # 生成等效的 curl 命令
+                full_request_body = {
+                    "input": cleaned,
+                    "model": self.model
+                }
+                curl_command = self._generate_curl_command(
+                    url=request_url,
+                    headers=request_headers,
+                    body=full_request_body
+                )
+                
+                # 输出详细错误信息
                 logger.error(
                     f"Embedding API 调用失败:\n"
                     f"  错误类型: {error_details['error_type']}\n"
@@ -217,7 +320,18 @@ class VectorIndexBuilder:
                     f"  API 地址: {error_details['api_config']['base_url']}\n"
                     f"  模型名称: {error_details['api_config']['model']}\n"
                     f"  批次大小: {error_details['api_config']['batch_size']}\n"
-                    f"  首条文本: {error_details['batch_info']['first_text_preview']}"
+                    f"  首条文本: {error_details['batch_info']['first_text_preview']}\n"
+                    f"\n"
+                    f"  === 完整请求信息 ===\n"
+                    f"  URL: {request_url}\n"
+                    f"  Headers:\n"
+                    f"    Content-Type: application/json\n"
+                    f"    Authorization: Bearer {self.api_key[:15]}...{self.api_key[-8:] if len(self.api_key) > 25 else ''}\n"
+                    f"  Body (显示前{len(display_cleaned)}条,共{len(cleaned)}条):\n"
+                    f"{request_body_str}\n"
+                    f"\n"
+                    f"  === 等效调试命令 ===\n"
+                    f"{curl_command}\n"
                 )
                 
                 # 尝试单条请求来诊断问题
